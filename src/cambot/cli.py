@@ -14,27 +14,20 @@ from cambot.config import load_cameras_config
 def main():
     parser = argparse.ArgumentParser(description="Security camera monitoring agent")
     parser.add_argument("--model", type=str, default=None, help="Claude model to use")
-    parser.add_argument("--mock", action="store_true", help="Use mock cameras with sample images (no real cameras needed)")
     parser.add_argument("--watch", action="store_true", help="Enable autonomous periodic camera checks")
     parser.add_argument("--interval", type=int, default=5, help="Default minutes between watch checks (default: 5)")
     parser.add_argument("--telegram", action="store_true", help="Run as a Telegram bot instead of CLI")
     parser.add_argument("--config", type=str, default=None, help="Path to cameras YAML config file")
     args = parser.parse_args()
 
-    if args.mock:
-        from cambot.mock import MockCameraManager, load_mock_config
-        camera_manager = MockCameraManager()
-        config = load_mock_config()
-        print("Running in mock mode with sample camera images.\n")
-    else:
-        from pathlib import Path
-        config_path = Path(args.config) if args.config else None
-        try:
-            config = load_cameras_config(config_path)
-        except (FileNotFoundError, ValueError) as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-        camera_manager = CameraManager(config_path)
+    from pathlib import Path
+    config_path = Path(args.config) if args.config else None
+    try:
+        config = load_cameras_config(config_path)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    camera_manager = CameraManager(config_path)
 
     model = args.model or config.get("settings", {}).get("model", "claude-sonnet-4-5-20250929")
     agent = SecurityAgent(camera_manager, config, model=model)
