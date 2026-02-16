@@ -1,5 +1,4 @@
 import base64
-import json
 
 from cambot.camera import CameraManager, CameraCaptureError
 from cambot.context import MemoryStore
@@ -155,6 +154,31 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "send_photo",
+        "description": (
+            "Send a camera snapshot photo directly to the user. Use this when "
+            "you detect something the user should see (anomalies, alerts, "
+            "unfamiliar people), when the user asks to see a camera or says "
+            "'show me', or during autonomous watch checks for alert-worthy "
+            "observations. This captures a fresh snapshot and delivers it to "
+            "the user's chat."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "camera_name": {
+                    "type": "string",
+                    "description": "The camera to capture and send a photo from",
+                },
+                "caption": {
+                    "type": "string",
+                    "description": "Optional caption to include with the photo",
+                },
+            },
+            "required": ["camera_name"],
+        },
+    },
+    {
         "name": "capture_location_snapshots",
         "description": (
             "Capture snapshots from cameras at a specific location, optionally "
@@ -211,11 +235,12 @@ def execute_tool(
     camera_manager: CameraManager,
     memory_store: MemoryStore,
     watcher=None,
+    photo_queue: list | None = None,
 ) -> str | list[dict]:
 
     if tool_name == "get_watcher_status":
         if watcher is None:
-            return "Autonomous monitoring is not enabled. Start with --watch to enable it."
+            return "Autonomous monitoring is not running."
         status = watcher.status()
         lines = []
         lines.append(f"Running: {status['running']}")
@@ -288,6 +313,21 @@ def execute_tool(
             return f"No cameras found at location '{location}'. Available locations: {', '.join(all_locations)}"
         results = camera_manager.capture_multiple([c.name for c in cams])
         return _build_snapshot_content(results, camera_manager)
+
+    elif tool_name == "send_photo":
+        name = tool_input["camera_name"]
+        caption = tool_input.get("caption", "")
+        try:
+            jpeg_data = camera_manager.capture_snapshot(name)
+        except CameraCaptureError as e:
+            return f"Failed to capture photo to send: {e}"
+        cam = camera_manager.cameras[name]
+        if not caption:
+            caption = f"{cam.display_name} ({cam.home} / {cam.location})"
+        if photo_queue is not None:
+            photo_queue.append((jpeg_data, caption))
+            return f"Photo from '{cam.display_name}' queued for delivery to user."
+        return f"Photo captured from '{cam.display_name}' but no delivery channel available."
 
     else:
         return f"Unknown tool: {tool_name}"

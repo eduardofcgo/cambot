@@ -50,7 +50,13 @@ next check only recaptures those — don't re-check all cameras if only one need
 attention. Omit focus_cameras when you want to return to a full sweep.
 - When the user asks about monitoring status, next check time, or what the last \
 check found, use get_watcher_status to get the current state of the autonomous \
-watcher.\
+watcher.
+- When you detect something the user should see (anomalies, alerts, unfamiliar \
+people), use send_photo to send the relevant camera snapshot to the user.
+- When the user asks to see a camera or says "show me", use send_photo after \
+capturing and analyzing.
+- During autonomous watch checks, use send_photo for any alert-worthy observations \
+so the user can see what triggered the alert.\
 """
 
 
@@ -60,15 +66,20 @@ class SecurityAgent:
         camera_manager: CameraManager,
         config: dict,
         model: str = "claude-sonnet-4-5-20250929",
+        language: str | None = None,
+        locale: str | None = None,
     ):
         self.client = anthropic.Anthropic()
         self.camera_manager = camera_manager
         self.memory_store = MemoryStore()
         self.config = config
         self.model = model
+        self.language = language
+        self.locale = locale
         self.messages: list[dict] = []
         self._lock = threading.Lock()
         self.watcher = None  # set externally when watcher is enabled
+        self._pending_photos: list[tuple[bytes, str]] = []
 
     def _get_system_prompt(self) -> str:
         homes_cfg = self.config.get("homes", {})
@@ -100,10 +111,18 @@ class SecurityAgent:
         if memory_text:
             memories_section = f"\nTHINGS THE USER HAS TOLD YOU:\n{memory_text}\n"
 
-        return SYSTEM_PROMPT_TEMPLATE.format(
+        prompt = SYSTEM_PROMPT_TEMPLATE.format(
             home_camera_context="\n".join(lines),
             memories_section=memories_section,
         )
+
+        if self.language:
+            lang_instruction = f"\nLANGUAGE: Always respond in {self.language}."
+            if self.locale:
+                lang_instruction += f" Use locale {self.locale} for dates and times."
+            prompt += lang_instruction
+
+        return prompt
 
     def _run_turn(self) -> tuple[str, int | None, str | None, list[str] | None]:
         """Run the agent loop until it stops.
@@ -139,6 +158,7 @@ class SecurityAgent:
                         self.camera_manager,
                         self.memory_store,
                         watcher=self.watcher,
+                        photo_queue=self._pending_photos,
                     )
                     tool_results.append({
                         "type": "tool_result",
@@ -148,8 +168,15 @@ class SecurityAgent:
 
             self.messages.append({"role": "user", "content": tool_results})
 
+    def pop_pending_photos(self) -> list[tuple[bytes, str]]:
+        """Retrieve and clear any photos queued during the last turn."""
+        photos = self._pending_photos[:]
+        self._pending_photos.clear()
+        return photos
+
     def chat(self, user_message: str) -> str:
         with self._lock:
+            self._pending_photos.clear()
             self.messages.append({"role": "user", "content": user_message})
             text, _, _, _ = self._run_turn()
             return text
@@ -158,6 +185,7 @@ class SecurityAgent:
         """Autonomous watch check. Shares conversation history.
         Returns (report_text, next_check_minutes, schedule_reason, focus_cameras)."""
         now = datetime.now(timezone.utc).strftime("%A, %Y-%m-%d %H:%M:%S UTC")
+        self._pending_photos.clear()
 
         if focus_cameras:
             camera_instruction = (

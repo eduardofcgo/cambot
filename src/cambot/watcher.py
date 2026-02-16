@@ -7,11 +7,12 @@ WATCH_OK = "WATCH_OK"
 class Watcher:
     """Background watcher that periodically triggers the agent to check cameras."""
 
-    def __init__(self, agent, default_interval: int = 300, on_alert=None):
+    def __init__(self, agent, default_interval: int = 300, on_alert=None, on_activity=None):
         self.agent = agent
         self.default_interval = default_interval  # seconds
         self._next_interval = default_interval
-        self._on_alert = on_alert  # callback(alert_text: str) or None
+        self._on_alert = on_alert  # callback(alert_text: str, photos: list) or None
+        self._on_activity = on_activity  # callback() fired when a check starts
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -40,9 +41,13 @@ class Watcher:
                 break
 
             try:
+                if self._on_activity:
+                    self._on_activity()
+
                 report, next_minutes, schedule_reason, focus_cameras = self.agent.watch(
                     focus_cameras=self._focus_cameras,
                 )
+                photos = self.agent.pop_pending_photos()
                 self.last_check_at = datetime.now(timezone.utc)
                 self.last_report = report
 
@@ -56,7 +61,7 @@ class Watcher:
                     self.last_schedule_reason = None
                     self._focus_cameras = None
 
-                # Only print if the agent has something to say
+                # Only alert if the agent has something to say
                 is_ok = report.strip().upper().replace(".", "") == WATCH_OK if report else True
 
                 if not is_ok:
@@ -68,7 +73,7 @@ class Watcher:
                         f"--- Next check in {next_min} min ---"
                     )
                     if self._on_alert:
-                        self._on_alert(alert_text)
+                        self._on_alert(alert_text, photos)
                     else:
                         print(f"\n{alert_text}\n")
 

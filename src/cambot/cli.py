@@ -1,6 +1,9 @@
 import argparse
+import itertools
 import os
 import sys
+import tempfile
+import threading
 
 from dotenv import load_dotenv
 
@@ -11,13 +14,58 @@ from cambot.agent import SecurityAgent
 from cambot.config import load_cameras_config
 
 
+class Spinner:
+    """Simple CLI spinner shown while the agent is thinking."""
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, message: str = "Thinking"):
+        self._message = message
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self):
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self._stop.set()
+        if self._thread:
+            self._thread.join()
+        sys.stderr.write("\r\033[K")
+        sys.stderr.flush()
+
+    def _spin(self):
+        for frame in itertools.cycle(self._FRAMES):
+            if self._stop.is_set():
+                break
+            sys.stderr.write(f"\r{frame} {self._message}...")
+            sys.stderr.flush()
+            self._stop.wait(0.1)
+
+
+def _save_photos(photos: list[tuple[bytes, str]]) -> None:
+    """Save photos to temp dir and print paths."""
+    if not photos:
+        return
+    tmp_dir = tempfile.mkdtemp(prefix="cambot_")
+    for i, (jpeg_data, caption) in enumerate(photos):
+        path = os.path.join(tmp_dir, f"photo_{i}.jpg")
+        with open(path, "wb") as f:
+            f.write(jpeg_data)
+        print(f"  Photo saved: {path} — {caption}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Security camera monitoring agent")
     parser.add_argument("--model", type=str, default=None, help="Claude model to use")
-    parser.add_argument("--watch", action="store_true", help="Enable autonomous periodic camera checks")
     parser.add_argument("--interval", type=int, default=5, help="Default minutes between watch checks (default: 5)")
     parser.add_argument("--telegram", action="store_true", help="Run as a Telegram bot instead of CLI")
     parser.add_argument("--config", type=str, default=None, help="Path to cameras YAML config file")
+    parser.add_argument("--language", type=str, default=None, help="Language for responses (e.g. en, es, pt-BR)")
+    parser.add_argument("--locale", type=str, default=None, help="Locale for date/time formatting (e.g. en_US, pt_BR)")
     args = parser.parse_args()
 
     from pathlib import Path
@@ -30,30 +78,36 @@ def main():
     camera_manager = CameraManager(config_path)
 
     model = args.model or config.get("settings", {}).get("model", "claude-sonnet-4-5-20250929")
-    agent = SecurityAgent(camera_manager, config, model=model)
+    agent = SecurityAgent(
+        camera_manager, config, model=model,
+        language=args.language, locale=args.locale,
+    )
 
     if args.telegram:
         from cambot.telegram import TelegramBot
+        from cambot.watcher import Watcher
 
         bot = TelegramBot(agent)
 
-        if args.watch:
-            from cambot.watcher import Watcher
-            chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-            if chat_id:
-                on_alert = lambda text: bot.send_alert_sync(chat_id, text)
-                watcher = Watcher(agent, default_interval=args.interval * 60, on_alert=on_alert)
-            else:
-                print("Warning: TELEGRAM_CHAT_ID not set, watcher alerts will print to stdout.")
-                watcher = Watcher(agent, default_interval=args.interval * 60)
-            agent.watcher = watcher
-            watcher.start()
-            print(f"Watcher enabled — checking every {args.interval} min (agent can adjust).")
+        chat_id = bot.chat_id
+        if chat_id:
+            on_alert = lambda text, photos=None: bot.send_alert_sync(chat_id, text, photos)
+            on_activity = lambda: bot.send_typing_sync(chat_id)
+            watcher = Watcher(
+                agent, default_interval=args.interval * 60,
+                on_alert=on_alert, on_activity=on_activity,
+            )
+        else:
+            watcher = Watcher(agent, default_interval=args.interval * 60)
+        agent.watcher = watcher
+        watcher.start()
+        print(f"Watcher enabled — checking every {args.interval} min (agent can adjust).")
 
         if agent.memory_store.read():
-            chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+            chat_id = bot.chat_id
             if chat_id:
                 try:
+                    bot.send_typing_sync(chat_id)
                     summary = agent.chat(
                         "You just started up. Briefly summarize what you remember "
                         "from your memory — key facts, recent observations, and "
@@ -66,23 +120,23 @@ def main():
         print("Telegram bot starting...")
         bot.run()
     else:
-        if args.watch:
-            from cambot.watcher import Watcher
-            watcher = Watcher(agent, default_interval=args.interval * 60)
-            agent.watcher = watcher
-            watcher.start()
-            print(f"Watcher enabled — checking every {args.interval} min (agent can adjust).")
+        from cambot.watcher import Watcher
+        watcher = Watcher(agent, default_interval=args.interval * 60)
+        agent.watcher = watcher
+        watcher.start()
+        print(f"Watcher enabled — checking every {args.interval} min (agent can adjust).")
 
         print("Security camera monitor ready. Ask me anything about your cameras.")
         print("Type 'quit' or 'exit' to stop.\n")
 
         if agent.memory_store.read():
             try:
-                summary = agent.chat(
-                    "You just started up. Briefly summarize what you remember "
-                    "from your memory — key facts, recent observations, and "
-                    "anything the user should know. Be concise."
-                )
+                with Spinner("Loading memory"):
+                    summary = agent.chat(
+                        "You just started up. Briefly summarize what you remember "
+                        "from your memory — key facts, recent observations, and "
+                        "anything the user should know. Be concise."
+                    )
                 print(f"Agent: {summary}\n")
             except Exception as e:
                 print(f"(Could not load memory summary: {e})\n", file=sys.stderr)
@@ -101,7 +155,10 @@ def main():
                 break
 
             try:
-                response = agent.chat(user_input)
+                with Spinner():
+                    response = agent.chat(user_input)
+                    photos = agent.pop_pending_photos()
                 print(f"\nAgent: {response}\n")
+                _save_photos(photos)
             except Exception as e:
                 print(f"\nError: {e}\n", file=sys.stderr)
