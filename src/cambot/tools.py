@@ -110,7 +110,10 @@ TOOL_DEFINITIONS = [
             "autonomous watch checks to control the monitoring cadence. Consider "
             "time of day, current conditions, and what you know from memory. "
             "For example: check more frequently at night or when the house should "
-            "be empty, less frequently during expected normal activity."
+            "be empty, less frequently during expected normal activity. "
+            "You can optionally specify which cameras to focus on next time — "
+            "use this when something needs follow-up on specific cameras instead "
+            "of rechecking everything."
         ),
         "input_schema": {
             "type": "object",
@@ -122,6 +125,16 @@ TOOL_DEFINITIONS = [
                 "reason": {
                     "type": "string",
                     "description": "Brief reason for this interval",
+                },
+                "focus_cameras": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional list of camera names to focus on in the next check. "
+                        "If omitted, the next check will cover all cameras as usual. "
+                        "Use this when you detect something on specific cameras and "
+                        "want to follow up on just those without rechecking everything."
+                    ),
                 },
             },
             "required": ["minutes", "reason"],
@@ -215,6 +228,8 @@ def execute_tool(
         lines.append(f"Current interval: {status['interval_seconds'] // 60} minutes")
         if status["last_schedule_reason"]:
             lines.append(f"Interval reason: {status['last_schedule_reason']}")
+        if status.get("focus_cameras"):
+            lines.append(f"Next check focused on: {', '.join(status['focus_cameras'])}")
         if status["last_report"]:
             lines.append(f"Last report: {status['last_report']}")
         return "\n".join(lines)

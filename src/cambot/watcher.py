@@ -21,6 +21,7 @@ class Watcher:
         self.next_check_at: datetime | None = None
         self.last_report: str | None = None
         self.last_schedule_reason: str | None = None
+        self._focus_cameras: list[str] | None = None
 
     def start(self) -> None:
         self.running = True
@@ -39,17 +40,21 @@ class Watcher:
                 break
 
             try:
-                report, next_minutes, schedule_reason = self.agent.watch()
+                report, next_minutes, schedule_reason, focus_cameras = self.agent.watch(
+                    focus_cameras=self._focus_cameras,
+                )
                 self.last_check_at = datetime.now(timezone.utc)
                 self.last_report = report
 
-                # Update interval
+                # Update interval and focus for next check
                 if next_minutes and next_minutes > 0:
                     self._next_interval = next_minutes * 60
                     self.last_schedule_reason = schedule_reason
+                    self._focus_cameras = focus_cameras  # may be None (= check all)
                 else:
                     self._next_interval = self.default_interval
                     self.last_schedule_reason = None
+                    self._focus_cameras = None
 
                 # Only print if the agent has something to say
                 is_ok = report.strip().upper().replace(".", "") == WATCH_OK if report else True
@@ -80,4 +85,5 @@ class Watcher:
             "last_report": self.last_report,
             "last_schedule_reason": self.last_schedule_reason,
             "interval_seconds": self._next_interval,
+            "focus_cameras": self._focus_cameras,
         }
