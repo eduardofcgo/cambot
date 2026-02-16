@@ -1,0 +1,68 @@
+# Mock camera configuration for testing without real cameras.
+# Used automatically when running: cambot --mock
+# Images are loaded from assets/mock/ instead of RTSP streams.
+
+homes:
+  main_house:
+    description: "My main apartment downtown"
+  beach_house:
+    description: "Beach house in Cancun"
+
+cameras:
+  # -- Main house --
+  - name: main_front_door
+    display_name: "Front Door"
+    home: main_house
+    location: front_porch
+    asset: front_door.jpg
+    enabled: true
+    description: "Front porch and entrance area"
+    typical_activity: "Delivery drivers, neighbors walking by"
+    alert_conditions: "Unknown people lingering at night"
+
+  - name: main_backyard
+    display_name: "Backyard"
+    home: main_house
+    location: backyard
+    asset: backyard.jpg
+    enabled: true
+    description: "Backyard garden and fence line"
+    typical_activity: "Empty most of the time, occasional gardener"
+    alert_conditions: "Anyone climbing the fence"
+
+  - name: main_garage
+    display_name: "Garage"
+    home: main_house
+    location: garage
+    asset: garage.jpg
+    enabled: true
+    description: "Garage entrance and driveway"
+    typical_activity: "Cars parked, quiet street"
+    alert_conditions: "Garage door open at night, unknown vehicles"
+
+  # -- Beach house --
+  - name: beach_entrance
+    display_name: "Beach House Entrance"
+    home: beach_house
+    location: entrance
+    asset: entrance.jpg
+    enabled: true
+    description: "Main entrance and walkway"
+    typical_activity: "Quiet, occasional property manager visits"
+    alert_conditions: "Any activity when we're not there"
+
+  - name: beach_patio
+    display_name: "Beach House Patio"
+    home: beach_house
+    location: patio
+    asset: patio.jpg
+    enabled: true
+    description: "Patio overlooking the beach"
+    typical_activity: "Empty patio, beach goers in the distance"
+    alert_conditions: "People on the patio when house is unoccupied"
+
+settings:
+  snapshot_timeout: 10
+  snapshot_quality: 2
+  model: "claude-sonnet-4-5-20250929"
+  max_tokens: 4096

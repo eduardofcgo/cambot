@@ -1,0 +1,11 @@
+cameras:
+  - name: sdp_camera
+    display_name: "SDP Stream"
+    home: default
+    location: default
+    sdp_file: "/tmp/stream.sdp"
+    enabled: true
+
+settings:
+  snapshot_timeout: 15
+  snapshot_quality: 2
