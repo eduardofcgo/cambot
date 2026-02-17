@@ -49,12 +49,3 @@ cambot --telegram
 | `--model MODEL` | Claude model to use (default: from config or `claude-sonnet-4-5-20250929`) |
 | `--interval MIN` | Minutes between watch checks (default: 5, agent can adjust dynamically) |
 | `--config PATH` | Path to cameras YAML config file |
-
-## Features
-
-- **Autonomous monitoring** — enabled by default, the watcher checks cameras periodically and alerts you when something needs attention. The AI adjusts its own check frequency based on conditions.
-- **Photo alerts** — when the AI detects something noteworthy or you ask to see a camera, it sends the actual snapshot photo (Telegram) or saves it to a temp directory (CLI).
-- **Typing indicators** — in Telegram, shows "typing..." while the AI is analyzing. In CLI, a spinner animates while waiting.
-- **Memory** — remembers people, schedules, and patterns across sessions. Teach it who lives where, what's normal, and what to watch for.
-- **Multi-language** — pass `--language` to get responses in your preferred language.
-- **Privacy by design** — only flags security-relevant observations; doesn't narrate personal activities.

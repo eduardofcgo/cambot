@@ -4,8 +4,14 @@ cameras:
     home: default
     location: default
     sdp_file: "/tmp/stream.sdp"
+    motion_detection: true
     enabled: true
 
 settings:
   snapshot_timeout: 15
   snapshot_quality: 2
+
+  motion:
+    enabled: true
+    person_detection: true
+

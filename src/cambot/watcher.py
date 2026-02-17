@@ -1,13 +1,19 @@
 import threading
 from datetime import datetime, timedelta, timezone
 
+from cambot.motion import MotionDetectorManager, MotionEvent
+
 WATCH_OK = "WATCH_OK"
 
 
 class Watcher:
     """Background watcher that periodically triggers the agent to check cameras."""
 
-    def __init__(self, agent, default_interval: int = 300, on_alert=None, on_activity=None):
+    def __init__(
+        self, agent, default_interval: int = 300,
+        on_alert=None, on_activity=None,
+        motion_detector: MotionDetectorManager | None = None,
+    ):
         self.agent = agent
         self.default_interval = default_interval  # seconds
         self._next_interval = default_interval
@@ -15,6 +21,7 @@ class Watcher:
         self._on_activity = on_activity  # callback() fired when a check starts
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._motion_detector = motion_detector
 
         # Observable state
         self.running: bool = False
@@ -37,16 +44,37 @@ class Watcher:
         while not self._stop_event.is_set():
             self.next_check_at = datetime.now(timezone.utc) + timedelta(seconds=self._next_interval)
 
-            if self._stop_event.wait(timeout=self._next_interval):
+            # Wait for timer, polling for motion events every second
+            remaining = self._next_interval
+            motion_events: list[MotionEvent] = []
+            while remaining > 0 and not self._stop_event.is_set():
+                wait_time = min(remaining, 1.0)
+                if self._stop_event.wait(timeout=wait_time):
+                    break
+                remaining -= wait_time
+
+                if self._motion_detector:
+                    events = self._motion_detector.get_pending_events()
+                    if events:
+                        motion_events.extend(events)
+                        break
+
+            if self._stop_event.is_set():
                 break
 
             try:
                 if self._on_activity:
                     self._on_activity()
 
-                report, next_minutes, schedule_reason, focus_cameras = self.agent.watch(
-                    focus_cameras=self._focus_cameras,
-                )
+                if motion_events:
+                    report, next_minutes, schedule_reason, focus_cameras = (
+                        self._handle_motion_events(motion_events)
+                    )
+                else:
+                    report, next_minutes, schedule_reason, focus_cameras = self.agent.watch(
+                        focus_cameras=self._focus_cameras,
+                    )
+
                 photos = self.agent.pop_pending_photos()
                 self.last_check_at = datetime.now(timezone.utc)
                 self.last_report = report
@@ -81,9 +109,45 @@ class Watcher:
                 print(f"\nWatch error: {e}")
                 self._next_interval = self.default_interval
 
+    def _handle_motion_events(
+        self, events: list[MotionEvent],
+    ) -> tuple[str, int | None, str | None, list[str] | None]:
+        """Deduplicate motion events and call agent with motion context."""
+        # Keep highest motion per camera
+        by_camera: dict[str, MotionEvent] = {}
+        for event in events:
+            existing = by_camera.get(event.camera_name)
+            if existing is None or event.motion_percentage > existing.motion_percentage:
+                by_camera[event.camera_name] = event
+
+        camera_names = list(by_camera.keys())
+        motion_context = []
+        for cam_name, event in by_camera.items():
+            line = (
+                f"- {cam_name}: {event.motion_percentage}% motion, "
+                f"{event.contour_count} regions, "
+                f"{event.person_count} people detected "
+                f"(was {event.previous_person_count}), "
+                f"trigger={event.trigger}, "
+                f"at {event.timestamp.strftime('%H:%M:%S UTC')}"
+            )
+            motion_context.append(line)
+
+        motion_snapshots = {
+            name: event.snapshot
+            for name, event in by_camera.items()
+            if event.snapshot
+        }
+
+        return self.agent.watch_motion(
+            motion_cameras=camera_names,
+            motion_context="\n".join(motion_context),
+            motion_snapshots=motion_snapshots,
+        )
+
     def status(self) -> dict:
         """Return the current watcher state as a dict."""
-        return {
+        result = {
             "running": self.running,
             "last_check_at": self.last_check_at.isoformat() if self.last_check_at else None,
             "next_check_at": self.next_check_at.isoformat() if self.next_check_at else None,
@@ -92,3 +156,6 @@ class Watcher:
             "interval_seconds": self._next_interval,
             "focus_cameras": self._focus_cameras,
         }
+        if self._motion_detector:
+            result["motion_detection"] = self._motion_detector.status()
+        return result

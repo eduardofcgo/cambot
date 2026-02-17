@@ -1,3 +1,4 @@
+import base64
 import threading
 from datetime import datetime, timezone
 
@@ -56,7 +57,30 @@ people), use send_photo to send the relevant camera snapshot to the user.
 - When the user asks to see a camera or says "show me", use send_photo after \
 capturing and analyzing.
 - During autonomous watch checks, use send_photo for any alert-worthy observations \
-so the user can see what triggered the alert.\
+so the user can see what triggered the alert.
+- Motion detection with person counting is active on some cameras. It continuously \
+monitors the video stream and triggers an immediate check the moment it detects \
+significant motion or a person count change — this is MUCH faster than periodic \
+watcher checks (seconds vs minutes).
+- When the user asks for real-time alerts about people appearing, arriving, or leaving, \
+motion detection is the right tool. If it's already enabled on the relevant camera, \
+tell the user it's already being monitored and will alert automatically. If it's not \
+enabled, use toggle_motion_detection to enable it. Do NOT rely on frequent watcher \
+schedule_next_check intervals for real-time person detection — that is too slow.
+- When a motion-triggered check occurs, you receive the motion snapshot captured at \
+detection time along with metadata: motion percentage, number of regions, person count, \
+and whether person count changed. You should also capture fresh snapshots to compare \
+against the motion frame. Higher motion percentage or more regions suggest larger or \
+multiple movements.
+- Person count changes (arrivals/departures) are tracked per camera. When you receive \
+a motion event with person_count different from previous_person_count, someone arrived \
+or left. Use this to make informed security decisions.
+- Check your memory for user-defined person-count rules. Users may have told you things \
+like "alert me if more than 2 people in the backyard" or "at night, any person at the \
+front door should trigger an alert." Apply these rules when evaluating motion events.
+- You can enable or disable motion detection per camera using toggle_motion_detection. \
+Use get_motion_status to see which cameras have motion detection active and current \
+person counts. Use get_scene_state to get detailed state for specific cameras.\
 """
 
 
@@ -79,6 +103,7 @@ class SecurityAgent:
         self.messages: list[dict] = []
         self._lock = threading.Lock()
         self.watcher = None  # set externally when watcher is enabled
+        self.motion_detector = None  # set externally when motion detection is enabled
         self._pending_photos: list[tuple[bytes, str]] = []
 
     def _get_system_prompt(self) -> str:
@@ -159,6 +184,7 @@ class SecurityAgent:
                         self.memory_store,
                         watcher=self.watcher,
                         photo_queue=self._pending_photos,
+                        motion_detector=self.motion_detector,
                     )
                     tool_results.append({
                         "type": "tool_result",
@@ -221,6 +247,53 @@ class SecurityAgent:
         )
         with self._lock:
             self.messages.append({"role": "user", "content": prompt})
+            return self._run_turn()
+
+    def watch_motion(
+        self,
+        motion_cameras: list[str],
+        motion_context: str,
+        motion_snapshots: dict[str, bytes] | None = None,
+    ) -> tuple[str, int | None, str | None, list[str] | None]:
+        """Motion-triggered watch check with pre-captured snapshots and person counts."""
+        now = datetime.now(timezone.utc).strftime("%A, %Y-%m-%d %H:%M:%S UTC")
+        self._pending_photos.clear()
+
+        camera_names_str = ", ".join(motion_cameras)
+        prompt = (
+            f"[Motion-triggered check at {now}]\n"
+            f"Motion was detected on the following cameras:\n{motion_context}\n\n"
+            f"The snapshots below were captured at the moment motion was detected on "
+            f"{camera_names_str}. Also capture fresh snapshots from these cameras "
+            f"using capture_snapshot to compare.\n"
+            "- If something needs the user's attention, describe it clearly.\n"
+            "- If the motion appears normal/expected, respond with just: WATCH_OK\n"
+            "- Check your memory for any user-defined rules about person counts.\n"
+            "- Respect privacy: only report security-relevant details.\n"
+            "- Use schedule_next_check to set follow-up timing — if concerning, "
+            "check again in 1-2 minutes with focus_cameras.\n"
+            "- Use save_memory to log the motion event.\n"
+            "- Use send_photo if the user should see this."
+        )
+
+        content: list[dict] = [{"type": "text", "text": prompt}]
+        if motion_snapshots:
+            for cam_name, jpeg_data in motion_snapshots.items():
+                cam = self.camera_manager.cameras.get(cam_name)
+                if cam and jpeg_data:
+                    label = f"Motion snapshot from '{cam.display_name}' ({cam.home} / {cam.location}):"
+                    content.append({"type": "text", "text": label})
+                    content.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": base64.b64encode(jpeg_data).decode("ascii"),
+                        },
+                    })
+
+        with self._lock:
+            self.messages.append({"role": "user", "content": content})
             return self._run_turn()
 
     def _extract_text(self, content: list) -> str:

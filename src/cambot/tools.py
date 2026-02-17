@@ -200,6 +200,60 @@ TOOL_DEFINITIONS = [
             "required": ["location"],
         },
     },
+    {
+        "name": "toggle_motion_detection",
+        "description": (
+            "Enable or disable motion detection for a specific camera. "
+            "Motion detection monitors the camera's RTSP stream continuously "
+            "and triggers an alert when significant movement or person count "
+            "changes are detected."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "camera_name": {
+                    "type": "string",
+                    "description": "The camera to toggle motion detection for",
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "True to enable, False to disable",
+                },
+            },
+            "required": ["camera_name", "enabled"],
+        },
+    },
+    {
+        "name": "get_motion_status",
+        "description": (
+            "Get the current status of motion detection across all cameras, "
+            "including which cameras are active and current person counts. "
+            "Use when the user asks about motion detection or monitoring status."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "get_scene_state",
+        "description": (
+            "Get the current scene state for one or all cameras: person count, "
+            "last person count change time, and last motion time. Use when the "
+            "user asks how many people are at a specific camera or location."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "camera_name": {
+                    "type": "string",
+                    "description": "Optional camera name. If omitted, returns state for all cameras.",
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -236,6 +290,7 @@ def execute_tool(
     memory_store: MemoryStore,
     watcher=None,
     photo_queue: list | None = None,
+    motion_detector=None,
 ) -> str | list[dict]:
 
     if tool_name == "get_watcher_status":
@@ -328,6 +383,53 @@ def execute_tool(
             photo_queue.append((jpeg_data, caption))
             return f"Photo from '{cam.display_name}' queued for delivery to user."
         return f"Photo captured from '{cam.display_name}' but no delivery channel available."
+
+    elif tool_name == "toggle_motion_detection":
+        if motion_detector is None:
+            return "Motion detection is not available (not configured)."
+        cam_name = tool_input["camera_name"]
+        enabled = tool_input["enabled"]
+        if enabled:
+            success = motion_detector.enable_camera(cam_name)
+        else:
+            success = motion_detector.disable_camera(cam_name)
+        if success:
+            state = "enabled" if enabled else "disabled"
+            return f"Motion detection {state} for camera '{cam_name}'."
+        return f"Camera '{cam_name}' not found or motion detection not configured for it."
+
+    elif tool_name == "get_motion_status":
+        if motion_detector is None:
+            return "Motion detection is not available (not configured)."
+        status = motion_detector.status()
+        if not status:
+            return "No cameras configured for motion detection."
+        lines = ["Motion detection status:"]
+        for name, info in status.items():
+            state = "ACTIVE" if info["enabled"] else "disabled"
+            people = info.get("person_count", 0)
+            last = info.get("last_motion_at", "never")
+            lines.append(f"  - {name}: {state}, {people} people, last motion: {last}")
+        return "\n".join(lines)
+
+    elif tool_name == "get_scene_state":
+        if motion_detector is None:
+            return "Motion detection is not available (not configured)."
+        cam_name = tool_input.get("camera_name")
+        state = motion_detector.get_scene_state(cam_name)
+        if not state:
+            if cam_name:
+                return f"No motion detection configured for camera '{cam_name}'."
+            return "No cameras configured for motion detection."
+        lines = ["Scene state:"]
+        for name, info in state.items():
+            lines.append(
+                f"  - {name}: {info['person_count']} people, "
+                f"last change: {info['last_person_change_at'] or 'never'}, "
+                f"last motion: {info['last_motion_at'] or 'never'}, "
+                f"detection: {'active' if info['enabled'] else 'disabled'}"
+            )
+        return "\n".join(lines)
 
     else:
         return f"Unknown tool: {tool_name}"

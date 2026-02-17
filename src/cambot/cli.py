@@ -1,5 +1,6 @@
 import argparse
 import itertools
+import logging
 import os
 import sys
 import tempfile
@@ -8,6 +9,13 @@ import threading
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from cambot.camera import CameraManager
 from cambot.agent import SecurityAgent
@@ -46,6 +54,107 @@ class Spinner:
             self._stop.wait(0.1)
 
 
+def _init_streams(config: dict) -> dict:
+    """Create and start StreamCapture instances for motion-enabled cameras."""
+    from cambot.capture import StreamCapture
+
+    motion_settings = config.get("settings", {}).get("motion", {})
+    fps = motion_settings.get("fps", 2)
+
+    streams = {}
+    for cam_cfg in config.get("cameras", []):
+        if not cam_cfg.get("enabled", True):
+            continue
+        if not cam_cfg.get("motion_detection", False):
+            continue
+
+        name = cam_cfg["name"]
+        sdp_file = cam_cfg.get("sdp_file")
+        rtsp_url = cam_cfg.get("rtsp_url")
+        if not sdp_file and not rtsp_url:
+            continue
+
+        stream = StreamCapture(
+            camera_name=name,
+            sdp_file=sdp_file,
+            rtsp_url=rtsp_url,
+            fps=fps,
+        )
+        stream.start()
+        streams[name] = stream
+
+    return streams
+
+
+def _init_motion(config: dict, camera_manager, streams: dict | None = None):
+    """Build a MotionDetectorManager from cameras.yaml config, or return None."""
+    from cambot.motion import MotionConfig, MotionDetectorManager
+
+    motion_settings = config.get("settings", {}).get("motion", {})
+    if not motion_settings.get("enabled", False):
+        return None
+
+    global_config = MotionConfig(
+        enabled=True,
+        threshold=motion_settings.get("threshold", 1.0),
+        cooldown=motion_settings.get("cooldown", 60),
+        fps=motion_settings.get("fps", 2),
+        resolution=tuple(motion_settings.get("resolution", [320, 240])),
+        min_contour_area=motion_settings.get("min_contour_area", 500),
+        warmup_frames=motion_settings.get("warmup_frames", 30),
+        history=motion_settings.get("history", 500),
+        var_threshold=motion_settings.get("var_threshold", 16),
+        reconnect_delay=motion_settings.get("reconnect_delay", 5),
+        max_reconnect_delay=motion_settings.get("max_reconnect_delay", 60),
+        person_detection=motion_settings.get("person_detection", True),
+        person_confidence=motion_settings.get("person_confidence", 0.4),
+        yolo_model=motion_settings.get("yolo_model", "yolov8n"),
+    )
+
+    # Build per-camera configs and camera info dict
+    per_camera_configs: dict[str, MotionConfig] = {}
+    cameras_info: dict[str, dict] = {}
+
+    for cam_cfg in config.get("cameras", []):
+        if not cam_cfg.get("enabled", True):
+            continue
+        if not cam_cfg.get("motion_detection", False):
+            continue
+
+        name = cam_cfg["name"]
+        cameras_info[name] = {
+            "rtsp_url": cam_cfg.get("rtsp_url"),
+            "sdp_file": cam_cfg.get("sdp_file"),
+            "display_name": cam_cfg.get("display_name", name),
+        }
+
+        cam_motion = cam_cfg.get("motion_config", {})
+        if cam_motion:
+            per_camera_configs[name] = MotionConfig(
+                enabled=True,
+                threshold=cam_motion.get("threshold", global_config.threshold),
+                cooldown=cam_motion.get("cooldown", global_config.cooldown),
+                fps=cam_motion.get("fps", global_config.fps),
+                resolution=global_config.resolution,
+                min_contour_area=global_config.min_contour_area,
+                warmup_frames=global_config.warmup_frames,
+                history=global_config.history,
+                var_threshold=global_config.var_threshold,
+                reconnect_delay=global_config.reconnect_delay,
+                max_reconnect_delay=global_config.max_reconnect_delay,
+                person_detection=global_config.person_detection,
+                person_confidence=global_config.person_confidence,
+                yolo_model=global_config.yolo_model,
+            )
+
+    if not cameras_info:
+        return None
+
+    return MotionDetectorManager(
+        cameras_info, global_config, per_camera_configs, streams=streams,
+    )
+
+
 def _save_photos(photos: list[tuple[bytes, str]]) -> None:
     """Save photos to temp dir and print paths."""
     if not photos:
@@ -66,6 +175,7 @@ def main():
     parser.add_argument("--config", type=str, default=None, help="Path to cameras YAML config file")
     parser.add_argument("--language", type=str, default=None, help="Language for responses (e.g. en, es, pt-BR)")
     parser.add_argument("--locale", type=str, default=None, help="Locale for date/time formatting (e.g. en_US, pt_BR)")
+    parser.add_argument("--no-motion", action="store_true", help="Disable motion detection even if configured")
     args = parser.parse_args()
 
     from pathlib import Path
@@ -77,11 +187,22 @@ def main():
         sys.exit(1)
     camera_manager = CameraManager(config_path)
 
+    # Create shared stream captures for motion-enabled cameras
+    streams = {}
+    if not args.no_motion:
+        streams = _init_streams(config)
+        camera_manager.set_streams(streams)
+
     model = args.model or config.get("settings", {}).get("model", "claude-sonnet-4-5-20250929")
     agent = SecurityAgent(
         camera_manager, config, model=model,
         language=args.language, locale=args.locale,
     )
+
+    # Motion detection setup
+    motion_detector = None
+    if not args.no_motion:
+        motion_detector = _init_motion(config, camera_manager, streams)
 
     if args.telegram:
         from cambot.telegram import TelegramBot
@@ -96,11 +217,18 @@ def main():
             watcher = Watcher(
                 agent, default_interval=args.interval * 60,
                 on_alert=on_alert, on_activity=on_activity,
+                motion_detector=motion_detector,
             )
         else:
-            watcher = Watcher(agent, default_interval=args.interval * 60)
+            watcher = Watcher(agent, default_interval=args.interval * 60,
+                              motion_detector=motion_detector)
         agent.watcher = watcher
+        agent.motion_detector = motion_detector
         watcher.start()
+        if motion_detector:
+            motion_detector.start()
+            count = sum(1 for d in motion_detector._detectors.values() if d.is_enabled)
+            print(f"Motion detection active on {count} camera(s).")
         print(f"Watcher enabled — checking every {args.interval} min (agent can adjust).")
 
         if agent.memory_store.read():
@@ -121,9 +249,15 @@ def main():
         bot.run()
     else:
         from cambot.watcher import Watcher
-        watcher = Watcher(agent, default_interval=args.interval * 60)
+        watcher = Watcher(agent, default_interval=args.interval * 60,
+                          motion_detector=motion_detector)
         agent.watcher = watcher
+        agent.motion_detector = motion_detector
         watcher.start()
+        if motion_detector:
+            motion_detector.start()
+            count = sum(1 for d in motion_detector._detectors.values() if d.is_enabled)
+            print(f"Motion detection active on {count} camera(s).")
         print(f"Watcher enabled — checking every {args.interval} min (agent can adjust).")
 
         print("Security camera monitor ready. Ask me anything about your cameras.")

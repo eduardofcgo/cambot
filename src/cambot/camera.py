@@ -1,10 +1,15 @@
+from __future__ import annotations
+
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import TYPE_CHECKING
 
 from cambot.config import load_cameras_config
+
+if TYPE_CHECKING:
+    from cambot.capture import StreamCapture
 
 
 class CameraCaptureError(Exception):
@@ -25,6 +30,7 @@ class Camera:
 class CameraManager:
     def __init__(self, config_path: Path | None = None):
         self.cameras: dict[str, Camera] = {}
+        self._streams: dict[str, StreamCapture] = {}
         config = load_cameras_config(config_path)
         self._settings = config.get("settings", {})
 
@@ -62,6 +68,10 @@ class CameraManager:
             if cam.home.lower() == home.lower() and cam.enabled
         ]
 
+    def set_streams(self, streams: dict[str, StreamCapture]) -> None:
+        """Register shared stream captures for snapshot use."""
+        self._streams = streams
+
     def get_cameras_by_location(self, location: str, home: str | None = None) -> list[Camera]:
         results = []
         for cam in self.cameras.values():
@@ -85,6 +95,17 @@ class CameraManager:
         if timeout is None:
             timeout = self._settings.get("snapshot_timeout", 10)
 
+        # Prefer shared stream (avoids UDP port conflicts on SDP cameras)
+        stream = self._streams.get(camera_name)
+        if stream is not None and stream.is_connected:
+            jpeg = stream.get_jpeg(quality=90, timeout=timeout)
+            if jpeg is not None:
+                return jpeg
+
+        # Fallback: standalone ffmpeg (for cameras without an active shared stream)
+        return self._capture_ffmpeg(cam, timeout)
+
+    def _capture_ffmpeg(self, cam: Camera, timeout: int) -> bytes:
         quality = str(self._settings.get("snapshot_quality", 2))
 
         cmd = ["ffmpeg", "-y"]
